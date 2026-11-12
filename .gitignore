@@ -1,0 +1,24 @@
+# Captures, configs and outputs (large, local only)
+local/
+out/
+*.MOV
+*.mov
+*.MP4
+*.npy
+*.npz
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
