@@ -354,11 +354,18 @@ class Scene:
         pts = (o[:, None] + d[:, None] * tt[..., None]).reshape(-1, 3)
         tq = tn_frame[:, None].expand(-1, ns).reshape(-1)
         w = s.weight(pts, tq)
-        keep = torch.nonzero(w > 1e-3).squeeze(1)          # only evaluate the field inside the hull
-        xn = (pts[keep] - s.lo) / (s.hi - s.lo) * 2 - 1
-        sig = torch.zeros_like(w)
-        if len(keep):
-            sig = sig.index_put((keep,), model(torch.cat([xn, tq[keep, None]], -1)) * w[keep])
+        # Only evaluate the field inside the hull. The count is padded up to a fixed bucket so tensor shapes repeat:
+        # on MPS every new shape compiles and caches new kernels, and steps get slower and slower without this.
+        keep = torch.nonzero(w > 1e-3).squeeze(1)
+        n, N = len(keep), len(w)
+        bucket = 1 << 14
+        padded = min(-(-max(n, 1) // bucket) * bucket, N + bucket)
+        keep = torch.cat([keep, torch.full((padded - n,), N, dtype=keep.dtype, device=keep.device)])   # extra slot N
+        wk = torch.cat([w, torch.zeros(1, device=w.device)])[keep]
+        pk = torch.cat([pts, pts[:1]])[keep]
+        tk = torch.cat([tq, tq[:1]])[keep]
+        xn = (pk - s.lo) / (s.hi - s.lo) * 2 - 1
+        sig = torch.zeros(N + 1, device=w.device).index_put((keep,), model(torch.cat([xn, tk[:, None]], -1)) * wk)[:N]
         return sig.view(-1, ns), (tf - tn) / ns
 
 

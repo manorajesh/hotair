@@ -8,8 +8,8 @@ You film the same moment with several phones (flash on, pointed through the heat
 2. **calibrate**: works out each phone's focal length and position from a ChArUco board clip.
 3. **process**: turns each phone's footage into "air" and "heat" videos plus side-by-side clips, and tracks the flame.
 4. **place**: phones that never read the board are positioned from the flame seen by all the others.
-5. **field**: fits a 4D neural field (x, y, z, t → heat) that agrees with every phone at once.
-6. **render**: orbiting 3D video, height slices, a seen-vs-predicted check, and a training-progress clip.
+5. **field**: fits a 4D neural field (x, y, z, t → density) whose rendered shadowgrams match every phone's at full resolution.
+6. **render**: an orbit (density and the shadowgram a phone there would film), height slices, a seen-vs-predicted check, and a training-progress clip.
 
 ## Install (Mac, M-series)
 
@@ -52,15 +52,31 @@ Or one step at a time: `sync`, `calibrate`, `process`, `place`, `field`, `render
     "highlight":    [17, 38],                 // the part to also export as short side-by-side clips
     "field_window": [40, 46]                  // the part to reconstruct in 3D (keep it to ~5-10 s)
   },
-  "processing": {"clip_width": 960, "clip_fps": 30, "field_width": 480, "field_fps": 15,
+  "processing": {"clip_width": 960, "clip_fps": 30,
+                 "field_width": null, "field_fps": 30,  // frames the 3D step fits (null: native resolution)
                  "air_contrast": 0.04, "heat_contrast": 0.02},
   "field": {"box_size_m": [0.26, 0.45, 0.26],  // width, height, depth of the 3D region (flame at the bottom)
-            "steps": 1500, "device": "auto", "carve_threshold": 0.002},
+            "steps": 2000, "device": "auto"},   // 12000 steps gives a much sharper fit (~40 min on an M4 Pro)
   "output": "out"
 }
 ```
 
 Finding the times: watch the centre (reference) phone's clip. `reference` is a stretch before anyone walks in or anything hot appears. `field_window` is a steady stretch where the heat is visible in every view.
+
+Other `field` settings, all optional:
+
+| Key | Default | What it does |
+|---|---|---|
+| `vox_mm` | `[10, 5, 2.5, 1.25]` | Feature-plane cell size at each scale (finest last). |
+| `channels` | `8` | Features per plane. More is sharper and slower. |
+| `patches_per_camera` | `12` | 32×32 px patches rendered per phone per step. More is a steadier fit and slower. |
+| `samples_per_ray` | `48` | Samples along each line of sight during training. |
+| `highpass_px` | `30` | Removes slow lighting changes from the shadowgrams (in 1920-px-wide pixels). |
+| `hull_threshold` | `6` | How far above the noise (robust z-score) counts as "this phone saw heat here". |
+| `hull_dilate_px` | `24` | Margin around what each phone saw. |
+| `round_prior` | `true` | Assume a roughly round plume cross-section (see below). |
+| `export_vox_mm` | `4` | Voxel size of `field/volume.npy`. |
+| `box_center_m` | from the flame | Centre of the 3D box, if there's no flame to find. |
 
 ## What you get (in `out/`)
 
@@ -76,12 +92,14 @@ Finding the times: watch the centre (reference) phone's clip. `reference` is a s
 | `cameras/<cam>/original_synced.mp4` | Untouched footage cut to the shared clock. |
 | `cameras/<cam>/strongest.png`, `reference.png` | Strongest frame, and the empty reference. |
 | `all_cameras_*.mp4` | Grids of all phones in sync: air, heat, side_highlight, original_synced. |
-| `field/orbit.mp4` | The 3D plume playing while the view circles it (cleaned). |
-| `field/orbit_raw.mp4` | The same before cleaning (shows the limits of the camera layout). |
+| `field/orbit.mp4` | The plume playing while the view circles it: density on the left, the shadowgram a phone there would film on the right. |
+| `field/orbit_raw.mp4` | The same without the hull (only with `render.raw_orbit: true`; shows the limits of the camera layout). |
 | `field/slices.mp4` | Horizontal cuts through the plume at several heights, seen from above. |
-| `field/check_seen_vs_predicted.mp4` | Each phone's heat map next to what the 3D field predicts it should see. |
+| `field/check_seen_vs_predicted.mp4` | Each phone's shadowgram next to the one the field predicts. The log gives their correlation (signed, and of local energy). |
 | `field/training_progress.mp4` | The field's predictions sharpening during training. |
-| `field/volume.npy` | The cleaned 4D field as an array: (time, x, y, z), 5–6 mm voxels (`volume_raw.npy`: before cleaning). |
+| `field/field.pt` | The trained model; `render` draws its views straight from it. |
+| `field/volume.npy` | The 4D field sampled on a grid: (time, x, y, z), `field.export_vox_mm` voxels, float16. |
+| `field/fit.pkl` | The prepared shadowgrams, hull and training snapshots (input to `render`). |
 | `log.txt` | Everything printed, including fit quality numbers. |
 
 ## Shooting tips that matter most
@@ -100,20 +118,31 @@ Finding the times: watch the centre (reference) phone's clip. `reference` is a s
 
 `tools/make_charuco.py` makes the calibration image for a laptop screen.
 
+## Web export
+
+`tools/export_web.py` turns a finished run into small static files for a web page: the rig, the calibration board as each phone saw it, audio sync tracks, cropped clips, training snapshots and the 4D field (uint8, gzipped):
+`python tools/export_web.py path/to/project.json path/to/site/public/hotair`.
+
 ## How the 3D part works (short version)
 
-Every heat-map pixel is treated as the sum of "heat" along that camera's line of sight through a box above the flame. A 4D K-Planes neural field (six 2D feature planes over xy, xz, yz, xt, yt, zt, multiplied together, then a small network) is trained so that simulated sums match all phones at once, with smoothness in space and time. When rendering, the result is cleaned (soft space carving): density fades out wherever any phone saw no heat along its line of sight, and nothing is kept below the flame. `field.carve_threshold` (default 0.002) sets how strict this is; changing it only needs `render`, not retraining.
+A shadowgram is, to first order, the 2D Laplacian of the air's density summed along each line of sight. So each phone's frames are turned into signed shadowgrams (frame ÷ empty sheet − 1, high-passed, divided by the noise level) at full resolution, and a 4D K-Planes field (six 2D feature planes over xy, xz, yz, xt, yt, zt at four scales down to 1.25 mm, multiplied together, then a small network) is fitted so that the Laplacian of its rendered projections matches them. Training renders 32×32 patches of neighbouring rays so the Laplacian can be taken, with smoothness in space and time.
 
-The result is a **shape field** (where the heat is and how it moves), not calibrated temperature.
+Two things keep the density where the phones say it is:
+
+- **Hull.** Wherever a phone saw nothing above the noise (smoothed over a few frames so it doesn't flicker), its line of sight is kept empty. Nothing is kept below the flame.
+- **Round prior.** With the phones on a narrow arc, each height's hull is a long sliver pointing away from them: its width is measured, its depth isn't. The prior keeps density inside a circle around the sliver's centre, sized from its narrow axis. Turn it off with `field.round_prior: false` if your phones surround the subject.
+
+The result is a **shape field** (where the heat is and how it moves), not calibrated temperature. Views far from the phones' arc rely on the round prior.
 
 ## Run times (for reference)
 
-On the 2-core cloud machine used for testing, with three 1080p phones: sync about 1.5 min, calibration about 7 min (cached afterwards), processing 14 s of footage about 2 min, 300 training steps about 7 min. An M4 Pro should be several times faster, and the 3D step uses its GPU.
+On an M4 Pro with three 1080p phones and a 6 s field window: sync 3 s, calibration about 1.5 min (cached afterwards), processing 68 s of footage about 3 min, preparing the field about 1 min, training about 0.2 s per step (12000 steps ≈ 40 min), render about 5 min.
 
 ## Troubleshooting
 
 - **"weak match" during sync**: that phone's audio didn't line up clearly. Clap in view next time. You can check with `sync_check.mp4`.
 - **A phone reads the board in very few frames**: it was too far from the board, or the screen was too dim. That phone gets placed from the flame instead (`place` step), which works if the other phones are board-calibrated.
 - **Halos or streaks in heat.mp4**: the sheet is moving or wrinkled. Tape it flat.
-- **3D looks stretched front to back**: the phones are too close together in angle. Spread them wider.
+- **3D looks stretched front to back**: the phones are too close together in angle. Spread them wider; `field.round_prior` (on by default) helps in the meantime.
+- **Predicted shadowgrams look faint or mushy**: train longer (`field.steps`), or shorten `field_window`. Every pixel of every frame has to be seen many times.
 - **Nothing in the 3D box**: the box is placed above the flame automatically. If you're not using a flame, set `field.box_center_m` (metres, in the anchor phone's coordinates; see calibration.json).

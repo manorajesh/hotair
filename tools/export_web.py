@@ -4,6 +4,7 @@
   python tools/export_web.py local/project.json ~/code/mano.raje.sh/public/hotair
 
 Writes:
+  calib.mp4           the calibration board as each phone saw it, in sync, detected corners drawn (calib.json)
   rig.json            phone positions and view cones, flame, 3D box (metres, y up, flame at the origin)
   sync.json           audio envelopes of every phone around a stretch of the take, and the offsets found
   clip_<cam>.mp4      cropped take: original | shadowgram side by side, around the field window
@@ -119,6 +120,58 @@ def _fit(img, w, h, fill):
     return out
 
 
+def calib(cfg, dst, span=5.0, fps=30, height=360, margin=170):
+    """The calibration board as each phone saw it, side by side and in sync, with the detected corners drawn.
+    Picks the stretch where all phones together found the most corners."""
+    cache = pickle.load(open(H.out(cfg, "calibration_detections.pkl"), "rb"))
+    dets = cache["dets"]
+    offsets = json.load(open(H.out(cfg, "sync.json")))["calib"]
+    cams = [k for k in cfg["cameras"] if dets.get(k)]
+    times = {k: np.array([d[0] for d in dets[k]]) for k in cams}
+    counts = {k: np.array([len(d[2]) for d in dets[k]]) for k in cams}
+    t_all = np.concatenate(list(times.values()))
+    best, best_s = None, -1
+    for s in np.arange(t_all.min(), t_all.max() - span, 0.25):
+        per = [counts[k][(times[k] >= s) & (times[k] < s + span)].sum() for k in cams]
+        sc = min(per)                        # every phone has to see it
+        if sc > best_s:
+            best, best_s = s, sc
+    tiles, boxes = [], {}
+    for k in cams:
+        m = (times[k] >= best) & (times[k] < best + span)
+        pts = np.concatenate([dets[k][i][1] for i in np.where(m)[0]]) if m.any() else np.zeros((1, 2))
+        x0, y0 = np.maximum(pts.min(0) - margin, 0).astype(int)
+        x1, y1 = np.minimum(pts.max(0) + margin, [1920, 1080]).astype(int)
+        boxes[k] = (x0, y0, x1, y1)
+        tiles.append(int(round((x1 - x0) * height / (y1 - y0))) // 2 * 2)
+    W = sum(tiles)
+    p = os.path.join(dst, "calib.mp4")
+    enc = subprocess.Popen([FFMPEG, "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{height}", "-r", str(fps),
+                            "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "25", "-g", "15", "-pix_fmt", "yuv420p",
+                            "-movflags", "+faststart", p], stdin=subprocess.PIPE)
+    gens = {k: decode(cfg["cameras"][k]["calib"], best + offsets[k], span, fps, color=True) for k in cams}
+    for i in range(int(span * fps)):
+        t = best + i / fps
+        row = []
+        for k, tw in zip(cams, tiles):
+            fr = next(gens[k], None)
+            x0, y0, x1, y1 = boxes[k]
+            img = np.zeros((y1 - y0, x1 - x0, 3), np.uint8) if fr is None else fr[y0:y1, x0:x1].copy()
+            j = int(np.argmin(np.abs(times[k] - t)))
+            if abs(times[k][j] - t) < 1.0 / 15:
+                for u, v in dets[k][j][1]:
+                    cv2.circle(img, (int(u - x0), int(v - y0)), 6, (20, 20, 20), -1, cv2.LINE_AA)
+                    cv2.circle(img, (int(u - x0), int(v - y0)), 4, (255, 255, 255), -1, cv2.LINE_AA)
+            row.append(cv2.resize(img, (tw, height), interpolation=cv2.INTER_AREA))
+        enc.stdin.write(np.hstack(row).tobytes())
+    enc.stdin.close()
+    enc.wait()
+    json.dump(dict(cams=cams, tiles=tiles, height=height, square_mm=cache["key"]["board"]["square_mm"],
+                   squares=[cache["key"]["board"]["squares_x"], cache["key"]["board"]["squares_y"]],
+                   frames={k: len(dets[k]) for k in cams}), open(os.path.join(dst, "calib.json"), "w"))
+    return best, best_s
+
+
 def training(cfg, fit, dst, height=320, aspect=0.72, contrast=4.0):
     data, snaps = fit["data"], fit["snaps"]
     mid = data["nT"] // 2
@@ -168,6 +221,7 @@ def main():
     data = fit["data"]
     rig(cfg, calib, data, dst)
     print("rig.json")
+    print("calib.mp4 from", calib(cfg, dst))
     sync(cfg, offsets, dst)
     print("sync.json")
     training(cfg, fit, dst)
