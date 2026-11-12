@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Export a finished run as small static files for the web page (mano.raje.sh/hot-air).
 
-  python tools/export_web.py local/project.json ~/code/mano.raje.sh/public/hotair
+  python tools/export_web.py local/project.json ~/code/mano.raje.sh/public/hotair [--vox 3]
+  (--vox: resample the field from the model at that voxel size in mm, instead of using field/volume.npy)
 
 Writes:
   calib.mp4           the calibration board as each phone saw it, in sync, detected corners drawn (calib.json)
@@ -191,11 +192,16 @@ def training(cfg, fit, dst, height=320, aspect=0.72, contrast=4.0):
     json.dump(dict(steps=[s for s, _ in snaps], loss=loss, tiles=tiles), open(os.path.join(dst, "train.json"), "w"))
 
 
-def field(cfg, data, dst, every=2):
-    vol = np.load(H.out(cfg, "field", "volume.npy"))[::every].astype(np.float32)
-    nz = vol[vol > 0]
-    lim = float(np.percentile(nz, 99.7)) if nz.size else 1.0
-    q = np.clip(vol / lim * 255, 0, 255).astype(np.uint8)          # (t, x, y, z) in camera-style axes
+def field(cfg, data, dst, every=2, pct=99.0, gamma=0.7, vox_mm=None):
+    if vox_mm:   # resample straight from the trained model (finer than field/volume.npy)
+        from hotair_lib import field as Fd
+        model, scene, _ = Fd.load(H.out(cfg, "field", "field.pt"), data)
+        vol = Fd.export_volume(model, scene, data, vox_mm)[::every].astype(np.float32)
+    else:
+        vol = np.load(H.out(cfg, "field", "volume.npy"))[::every].astype(np.float32)
+    nz = vol[vol > vol.max() * 1e-3]
+    lim = float(np.percentile(nz, pct)) if nz.size else 1.0        # the densest specks (near the flame) would set the scale otherwise
+    q = (np.clip(vol / lim, 0, 1) ** gamma * 255).astype(np.uint8)  # (t, x, y, z) in camera-style axes
     q = q[:, :, ::-1, ::-1]                                           # flip y and z -> y up
     q = np.ascontiguousarray(q.transpose(0, 3, 2, 1))                 # (t, z, y, x): x fastest
     with gzip.open(os.path.join(dst, "field.bin.gz"), "wb", compresslevel=9) as f:
@@ -215,18 +221,19 @@ def main():
     cfg = H.load_cfg(sys.argv[1])
     dst = os.path.expanduser(sys.argv[2])
     os.makedirs(dst, exist_ok=True)
-    calib = C.load(H.out(cfg, "calibration.json"))
+    cal = C.load(H.out(cfg, "calibration.json"))
     offsets = json.load(open(H.out(cfg, "sync.json")))["take"]
     fit = pickle.load(open(H.out(cfg, "field", "fit.pkl"), "rb"))
     data = fit["data"]
-    rig(cfg, calib, data, dst)
+    rig(cfg, cal, data, dst)
     print("rig.json")
     print("calib.mp4 from", calib(cfg, dst))
     sync(cfg, offsets, dst)
     print("sync.json")
     training(cfg, fit, dst)
     print("train_*.webp, train.json")
-    print("field", field(cfg, data, dst))
+    vox = float(sys.argv[sys.argv.index("--vox") + 1]) if "--vox" in sys.argv else None
+    print("field", field(cfg, data, dst, vox_mm=vox))
     meta = clips(cfg, offsets, data, dst)
     json.dump(meta, open(os.path.join(dst, "clips.json"), "w"))
     print("clips", meta)

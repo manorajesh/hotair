@@ -89,9 +89,9 @@ def prepare(cfg, calib, offsets, camdirs, log=print):
         pf = pf[:2] / pf[2]
         tk = tracks[k]
         tt = np.array(sorted(tk)) if tk else np.array([])
-        rad = int(round(fc.get("flame_mask_px", 28) * px))
+        rad = int(round(fc.get("flame_mask_px", 44) * px))   # the flame's own glow reads as false signal near it
         hp_sigma = fc.get("highpass_px", 30) * px
-        sgs, vals, tlist = [], [], []
+        sgs, vals, tlist, flames = [], [], [], []
         for i, g in enumerate(decode(path, f0 + off, f1 - f0, fps, fw)):
             ti = f0 + i / fps
             gc = g[y0:y1, x0:x1].astype(np.float32)
@@ -105,6 +105,7 @@ def prepare(cfg, calib, offsets, camdirs, log=print):
                     fu = tk[tt[j]] * s
             fx, fy = int(fu[0]) - x0, int(fu[1]) - y0
             cv2.circle(v, (fx, fy), rad, 0, -1)
+            flames.append((fx, fy))
             cv2.rectangle(v, (fx - rad + 1, fy), (fx + rad - 1, v.shape[0]), 0, -1)
             sg = masked_highpass(r, v > 0, hp_sigma)
             sg -= np.median(sg[v > 0]) if v.any() else 0
@@ -135,7 +136,9 @@ def prepare(cfg, calib, offsets, camdirs, log=print):
         known = np.stack([cv2.dilate(m.astype(np.uint8), np.ones((dil, dil), np.uint8)) for m in val]) > 0
         for i in range(len(sig_t)):
             hm = cv2.dilate(sig_t[i].astype(np.uint8), np.ones((dil, dil), np.uint8)).astype(np.float32)
-            hm = np.where(known[i] | sig_t[i], hm, 1.0)          # nothing known there (flame, hand, off-sheet): don't carve
+            hm = np.where(known[i] | sig_t[i], hm, 1.0)          # nothing known there (hand, off-sheet): don't carve
+            if fc.get("carve_flame", True):                      # ...except the flame itself, which no phone can see through
+                cv2.circle(hm, flames[i], rad, 0.0, -1)
             hull.append(cv2.GaussianBlur(hm, (0, 0), 2 * hs))
         hull = np.clip(np.stack(hull), 0, 1)
         sigpix = np.argwhere(sig).astype(np.int32)
