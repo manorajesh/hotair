@@ -74,6 +74,7 @@ Other `field` settings, all optional:
 | `highpass_px` | `30` | Removes slow lighting changes from the shadowgrams (in 1920-px-wide pixels). |
 | `hull_threshold` | `6` | How far above the noise (robust z-score) counts as "this phone saw heat here". |
 | `hull_dilate_px` | `24` | Margin around what each phone saw. |
+| `flame_mask_px` | `44` | Radius of the circle masked (and carved out of the hull) around the flame, which is too bright to read. |
 | `round_prior` | `true` | Assume a roughly round plume cross-section (see below). |
 | `export_vox_mm` | `4` | Voxel size of `field/volume.npy`. |
 | `box_center_m` | from the flame | Centre of the 3D box, if there's no flame to find. |
@@ -121,7 +122,7 @@ Other `field` settings, all optional:
 ## Web export
 
 `tools/export_web.py` turns a finished run into small static files for a web page: the rig, the calibration board as each phone saw it, audio sync tracks, cropped clips, training snapshots and the 4D field (uint8, gzipped):
-`python tools/export_web.py path/to/project.json path/to/site/public/hotair`.
+`python tools/export_web.py path/to/project.json path/to/site/public/hotair [--vox 3]`. `--vox` resamples the field (mm per voxel); brightness is scaled to the 99th percentile with a 0.7 gamma so a hot spot at the flame doesn't wash out the plume.
 
 ## How the 3D part works (short version)
 
