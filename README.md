@@ -122,7 +122,7 @@ Other `field` settings, all optional:
 ## Web export
 
 `tools/export_web.py` turns a finished run into small static files for a web page: the rig, the calibration board as each phone saw it, audio sync tracks, cropped clips, training snapshots and the 4D field (uint8, gzipped):
-`python tools/export_web.py path/to/project.json path/to/site/public/hotair [--vox 3]`. `--vox` resamples the field (mm per voxel); brightness is scaled to the 99th percentile with a 0.7 gamma so a hot spot at the flame doesn't wash out the plume.
+`python tools/export_web.py path/to/project.json path/to/site/public/hotair [--vox 2] [--only field]`. The field is written as one gzipped volume per frame (`field/NNN.gz`) so the page can stream it. `--vox` resamples it from the model (mm per voxel; 2 mm is about as fine as is worth it, finer adds mostly noise), `--only field` skips the videos; brightness is scaled to the 99th percentile with a 0.7 gamma so a hot spot at the flame doesn't wash out the plume.
 
 ## How the 3D part works (short version)
 

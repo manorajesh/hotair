@@ -496,7 +496,7 @@ def load(path, data, device=None):
     return model, Scene(data, device), (lambda k: ck["gains"][k])
 
 
-def export_volume(model, scene, data, vox_mm=4.0, chunk=262144):
+def export_volume(model, scene, data, vox_mm=4.0, chunk=262144, frames=None):
     """Density on a regular grid for every frame: (time, x, y, z), float16, hull applied."""
     torch = scene.torch
     size = data["hi"] - data["lo"]
@@ -506,7 +506,7 @@ def export_volume(model, scene, data, vox_mm=4.0, chunk=262144):
     xn = (G - scene.lo) / (scene.hi - scene.lo) * 2 - 1
     vols = []
     with torch.no_grad():
-        for ti in range(data["nT"]):
+        for ti in (range(data["nT"]) if frames is None else frames):
             out = []
             for i in range(0, len(G), chunk):
                 tq = scene.tnorm(torch.full((len(G[i:i + chunk]),), ti, device=scene.dev))

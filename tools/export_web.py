@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Export a finished run as small static files for the web page (mano.raje.sh/hot-air).
 
-  python tools/export_web.py local/project.json ~/code/mano.raje.sh/public/hotair [--vox 3]
-  (--vox: resample the field from the model at that voxel size in mm, instead of using field/volume.npy)
+  python tools/export_web.py local/project.json ~/code/mano.raje.sh/public/hotair [--vox 2] [--only field]
+  (--vox: resample the field from the model at that voxel size in mm, instead of using field/volume.npy;
+   --only field: just re-export the field)
 
 Writes:
   calib.mp4           the calibration board as each phone saw it, in sync, detected corners drawn (calib.json)
@@ -11,8 +12,8 @@ Writes:
   clip_<cam>.mp4      cropped take: original | shadowgram side by side, around the field window
   train_<cam>.webp    what the phone saw (first tile), then the field's prediction at each training snapshot
   train.json          snapshot steps, loss curve, tile sizes
-  field.bin.gz        the 3D field: uint8 frames, x fastest, then y, then z
-  field.json          its shape, box, frame rate
+  field/NNN.gz        the 3D field, one gzipped uint8 volume per frame, x fastest, then y, then z
+  field.json          its shape, box, frame rate, brightness gamma, per-frame sizes
 """
 import gzip
 import json
@@ -193,25 +194,37 @@ def training(cfg, fit, dst, height=320, aspect=0.72, contrast=4.0):
 
 
 def field(cfg, data, dst, every=2, pct=99.0, gamma=0.7, vox_mm=None):
+    """One gzipped uint8 volume per frame (field/NNN.gz), so the page can stream and decode frames as it plays."""
     if vox_mm:   # resample straight from the trained model (finer than field/volume.npy)
         from hotair_lib import field as Fd
         model, scene, _ = Fd.load(H.out(cfg, "field", "field.pt"), data)
-        vol = Fd.export_volume(model, scene, data, vox_mm)[::every].astype(np.float32)
+        vol = Fd.export_volume(model, scene, data, vox_mm, frames=range(0, data["nT"], every)).astype(np.float32)
     else:
         vol = np.load(H.out(cfg, "field", "volume.npy"))[::every].astype(np.float32)
     nz = vol[vol > vol.max() * 1e-3]
     lim = float(np.percentile(nz, pct)) if nz.size else 1.0        # the densest specks (near the flame) would set the scale otherwise
     q = (np.clip(vol / lim, 0, 1) ** gamma * 255).astype(np.uint8)  # (t, x, y, z) in camera-style axes
+    del vol
     q = q[:, :, ::-1, ::-1]                                           # flip y and z -> y up
     q = np.ascontiguousarray(q.transpose(0, 3, 2, 1))                 # (t, z, y, x): x fastest
-    with gzip.open(os.path.join(dst, "field.bin.gz"), "wb", compresslevel=9) as f:
-        f.write(q.tobytes())
+    out = os.path.join(dst, "field")
+    os.makedirs(out, exist_ok=True)
+    for f in os.listdir(out):
+        os.remove(os.path.join(out, f))
+    if os.path.exists(os.path.join(dst, "field.bin.gz")):
+        os.remove(os.path.join(dst, "field.bin.gz"))
+    sizes = []
+    for i, fr in enumerate(q):
+        with open(os.path.join(out, f"{i:03d}.gz"), "wb") as f:
+            f.write(gzip.compress(fr.tobytes(), compresslevel=9, mtime=0))
+        sizes.append(os.path.getsize(os.path.join(out, f"{i:03d}.gz")))
     lo, hi = FLIP @ (data["lo"] - data["F"]), FLIP @ (data["hi"] - data["F"])
     fps = data.get("fps", 30) / every
-    json.dump(dict(nx=q.shape[3], ny=q.shape[2], nz=q.shape[1], frames=q.shape[0], fps=fps,
+    json.dump(dict(nx=q.shape[3], ny=q.shape[2], nz=q.shape[1], frames=q.shape[0], fps=fps, gamma=gamma,
+                   vox_mm=vox_mm, bytes=sizes,
                    min=np.minimum(lo, hi).round(4).tolist(), max=np.maximum(lo, hi).round(4).tolist()),
               open(os.path.join(dst, "field.json"), "w"))
-    return q.shape
+    return q.shape, f"{sum(sizes) / 1e6:.1f} MB"
 
 
 def main():
@@ -225,6 +238,10 @@ def main():
     offsets = json.load(open(H.out(cfg, "sync.json")))["take"]
     fit = pickle.load(open(H.out(cfg, "field", "fit.pkl"), "rb"))
     data = fit["data"]
+    vox = float(sys.argv[sys.argv.index("--vox") + 1]) if "--vox" in sys.argv else None
+    if "--only" in sys.argv and sys.argv[sys.argv.index("--only") + 1] == "field":
+        print("field", field(cfg, data, dst, vox_mm=vox))
+        return
     rig(cfg, cal, data, dst)
     print("rig.json")
     print("calib.mp4 from", calib(cfg, dst))
@@ -232,7 +249,6 @@ def main():
     print("sync.json")
     training(cfg, fit, dst)
     print("train_*.webp, train.json")
-    vox = float(sys.argv[sys.argv.index("--vox") + 1]) if "--vox" in sys.argv else None
     print("field", field(cfg, data, dst, vox_mm=vox))
     meta = clips(cfg, offsets, data, dst)
     json.dump(meta, open(os.path.join(dst, "clips.json"), "w"))
