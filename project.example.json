@@ -8,7 +8,7 @@
   "board": {"squares_x": 8, "squares_y": 5, "square_mm": 28.36, "marker_ratio": 0.75, "dictionary": "DICT_5X5_100"},
   "calibration": {"detect_fps": 15, "same_lens": true},
   "take": {"reference": [4.5, 6.2], "analysis": [12, 80], "highlight": [17, 38], "field_window": [40, 46]},
-  "processing": {"clip_width": 960, "clip_fps": 30, "field_width": 480, "field_fps": 15, "air_contrast": 0.04, "heat_contrast": 0.02},
-  "field": {"box_size_m": [0.26, 0.45, 0.26], "steps": 1500, "device": "auto", "carve_threshold": 0.002},
+  "processing": {"clip_width": 960, "clip_fps": 30, "field_width": null, "field_fps": 30, "air_contrast": 0.04, "heat_contrast": 0.02},
+  "field": {"box_size_m": [0.26, 0.45, 0.26], "steps": 2000, "device": "auto"},
   "output": "out"
 }

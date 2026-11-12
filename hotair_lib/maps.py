@@ -8,7 +8,7 @@ For each camera this writes (in out/cameras/<cam>/):
   original_synced.mp4  untouched footage, cut to the shared reference clock (for sync checks)
   strongest.png        the frame with the most visible heat
   reference.png        the empty-sheet reference frame
-  maps.npz             field-window heat data + flame track (input to the 3D step)
+  maps.npz             flame track in full-resolution pixels (used to place the 3D box and mask the flame)
 """
 import os
 
@@ -50,8 +50,6 @@ def process_camera(cam, path, offset, cfg, outdir, log=print):
     pr = cfg.get("processing", {})
     W = pr.get("clip_width", 960)
     fps = pr.get("clip_fps", 30)
-    ffps = pr.get("field_fps", 15)
-    fW = pr.get("field_width", 480)
     contrast = pr.get("air_contrast", 0.04)
     heat_contrast = pr.get("heat_contrast", 0.02)
     info = probe(path)
@@ -66,7 +64,6 @@ def process_camera(cam, path, offset, cfg, outdir, log=print):
     cv2.imwrite(os.path.join(outdir, "reference.png"), ref.astype(np.uint8))
 
     a0, a1 = tk["analysis"]
-    f0, f1 = tk["field_window"]
     h0, h1 = tk.get("highlight", [a0, a1])
     H = ref.shape[0]
     wr = dict(side=Writer(os.path.join(outdir, "side.mp4"), 2 * W, H, fps),
@@ -74,8 +71,6 @@ def process_camera(cam, path, offset, cfg, outdir, log=print):
               air=Writer(os.path.join(outdir, "air.mp4"), W, H, fps, color=False),
               heat=Writer(os.path.join(outdir, "heat.mp4"), W, H, fps),
               orig=Writer(os.path.join(outdir, "original_synced.mp4"), W, H, fps))
-    step = max(1, int(round(fps / ffps)))
-    fr, fv, ft = [], [], []
     track = {}
     best, best_score = None, -1
     for i, bgr in enumerate(decode(path, a0 + offset, a1 - a0, fps, W, color=True)):
@@ -106,19 +101,10 @@ def process_camera(cam, path, offset, cfg, outdir, log=print):
         sc = float(np.percentile(mag[core], 99.5)) if core.any() else 0
         if sc > best_score:
             best_score, best = sc, side
-        if f0 <= t < f1 and i % step == 0:
-            small = cv2.resize(r, (fW, int(round(H * fW / W))), interpolation=cv2.INTER_AREA)
-            sv = cv2.resize(valid.astype(np.uint8), small.shape[::-1], interpolation=cv2.INTER_NEAREST).astype(bool)
-            fr.append(small.astype(np.float16))
-            fv.append(sv)
-            ft.append(t)
     for w in wr.values():
         w.close()
     if best is not None:
         cv2.imwrite(os.path.join(outdir, "strongest.png"), best)
-    ref_small = cv2.resize(ref, (fW, int(round(H * fW / W))), interpolation=cv2.INTER_AREA)
-    np.savez_compressed(os.path.join(outdir, "maps.npz"), r=np.stack(fr) if fr else np.zeros((0,)), valid=np.stack(fv) if fv else np.zeros((0,)),
-                        t=np.array(ft), ref=ref_small, scale=fW / info["width"],
-                        track_t=np.array(list(track.keys())), track_uv=np.array(list(track.values())))
-    log(f"  {cam}: {i + 1} frames processed, flame seen in {len(track)}, {len(ft)} frames kept for 3D")
+    np.savez_compressed(os.path.join(outdir, "maps.npz"), track_t=np.array(list(track.keys())), track_uv=np.array(list(track.values())))
+    log(f"  {cam}: {i + 1} frames processed, flame seen in {len(track)}")
     return track
