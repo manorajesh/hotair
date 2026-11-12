@@ -149,7 +149,58 @@ def prepare(cfg, calib, offsets, camdirs, log=print):
         for key in ("sg", "valid", "hull"):
             c[key] = c[key][:nT]
         c["sigpix"] = c["sigpix"][c["sigpix"][:, 0] < nT]
-    return dict(cams=out, lo=lo, hi=hi, F=F, t=ts[:nT], nT=nT, fps=fps)
+    res = dict(cams=out, lo=lo, hi=hi, F=F, t=ts[:nT], nT=nT, fps=fps)
+    if fc.get("round_prior", True):
+        res["round"] = round_prior(res, fc, log)
+    return res
+
+
+def round_prior(data, fc, log=print, vox=0.004):
+    """Plume centre and radius for every frame and height, assuming a roughly round cross-section.
+
+    With the phones on a narrow arc, the visual hull of each horizontal slice is a long sliver pointing away from
+    them: its width is measured, its depth isn't. Take the slice's centroid and the spread along its narrow axis,
+    and keep density within a circle of that radius. Returns (T, ny, 3): centre x, centre z, radius (metres)."""
+    lo, hi = data["lo"], data["hi"]
+    n = [max(2, int(round((hi[i] - lo[i]) / vox)) + 1) for i in range(3)]
+    axes = [np.linspace(lo[i], hi[i], n[i]) for i in range(3)]
+    X = np.stack(np.meshgrid(*axes, indexing="ij"), -1).reshape(-1, 3)
+    T = data["nT"]
+    occ = np.ones((T, X.shape[0]), bool)
+    for c in data["cams"].values():
+        p = c["K"] @ (c["R"] @ X.T + c["t"][:, None])
+        u = np.round(p[0] / p[2] - c["x0"]).astype(int)
+        v = np.round(p[1] / p[2] - c["y0"]).astype(int)
+        _, H, W = c["hull"].shape
+        inside = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        u, v = np.clip(u, 0, W - 1), np.clip(v, 0, H - 1)
+        for t in range(T):
+            occ[t] &= ~inside | (c["hull"][t][v, u] > 127)
+    occ = occ.reshape(T, *n)
+    xs, zs = axes[0], axes[2]
+    gx, gz = np.meshgrid(xs, zs, indexing="ij")
+    out = np.zeros((T, n[1], 3), np.float32)
+    has = np.zeros((T, n[1]), bool)
+    for t in range(T):
+        for j in range(n[1]):
+            m = occ[t, :, j, :]
+            if m.sum() < 6:
+                continue
+            px, pz = gx[m], gz[m]
+            cx, cz = px.mean(), pz.mean()
+            ev = np.linalg.eigvalsh(np.cov(np.stack([px - cx, pz - cz])))
+            out[t, j] = cx, cz, 2.0 * np.sqrt(max(ev[0], 0)) + fc.get("round_margin_m", 0.004)
+            has[t, j] = True
+    # fill gaps from neighbours, then smooth over height and time
+    from scipy.ndimage import gaussian_filter
+    w = gaussian_filter(has.astype(np.float32), (2, 3)) + 1e-6
+    for k in range(3):
+        out[..., k] = gaussian_filter(out[..., k] * has, (2, 3)) / w
+    out[..., 2] = np.where(gaussian_filter(has.astype(np.float32), (2, 3)) > 0.05, out[..., 2], 0)
+    r = out[..., 2][out[..., 2] > 0]
+    log(f"  round prior: plume radius median {np.median(r) * 100:.1f} cm (box depth {(hi[2] - lo[2]) * 100:.0f} cm)"
+        if r.size else "  round prior: no plume found")
+    return dict(y0=float(lo[1]), dy=float(vox), table=out)
 
 
 # ---------------------------------------------------------------- model
@@ -244,6 +295,10 @@ class Scene:
                              cen=f32(-c["R"].T @ c["t"]), x0=c["x0"], y0=c["y0"], H=Hc, W=Wc,
                              hull=f32(c["hull"].astype(np.float32) / 255)[None, None] if use_hull else None)
         s.use_hull = use_hull
+        s.round = None
+        if data.get("round") is not None:
+            r = data["round"]
+            s.round = dict(y0=r["y0"], dy=r["dy"], table=f32(r["table"]))
 
     def tnorm(s, ti):
         return ti.float() / max(s.nT - 1, 1) * 2 - 1
@@ -254,6 +309,16 @@ class Scene:
         w = torch.sigmoid((s.Fy - 0.005 - pts[:, 1]) / 0.002)
         if not s.use_hull:
             return w
+        if s.round is not None:   # keep density within the plume's (round) cross-section at this height and time
+            tab = s.round["table"]
+            T, ny, _ = tab.shape
+            ti = ((tn + 1) / 2 * (T - 1)).round().long().clamp(0, T - 1)
+            fy = ((pts[:, 1] - s.round["y0"]) / s.round["dy"]).clamp(0, ny - 1.001)
+            j = fy.floor().long()
+            a = (fy - j)[:, None]
+            row = tab[ti, j] * (1 - a) + tab[ti, j + 1] * a
+            dist = torch.sqrt((pts[:, 0] - row[:, 0]) ** 2 + (pts[:, 2] - row[:, 1]) ** 2)
+            w = w * torch.sigmoid((row[:, 2] - dist) / 0.003)
         for c in s.cams.values():
             p = pts @ c["KR"].T + c["Kt"]
             u = (p[:, 0] / p[:, 2] - c["x0"]) / (c["W"] - 1) * 2 - 1
